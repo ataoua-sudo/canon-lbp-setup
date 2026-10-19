@@ -1,0 +1,218 @@
+#!/usr/bin/env bash
+# canon-lbp-setup - universal installer for Canon LBP CAPT laser printers on Ubuntu 16.04 - 26.04.
+# Usage: sudo ./canon-lbp-setup [install|detect|list|doctor|uninstall] [options]   (see --help)
+set -uo pipefail
+
+ROOT_DIR=$(dirname "$(readlink -f "$0")")
+VERSION=0.1.0
+# shellcheck disable=SC1091
+for f in common models detect deps canon open; do . "$ROOT_DIR/lib/$f.sh"; done
+
+usage() {
+cat <<USAGE
+canon-lbp-setup $VERSION
+
+Commands:
+  install      (default) install prerequisites, detect or choose the printer, install driver, add queue
+  detect       show detected Canon CAPT printers and what would be installed (no changes)
+  list         list the supported models
+  doctor       check an existing Canon-driver installation (missing libraries, ccpd, queues)
+  fix          repair an installed Canon driver (32-bit libxml2 for the monitor, restart ccpd)
+  uninstall    remove printers and both drivers
+
+Options:
+  --model NAME        skip detection, e.g. --model LBP6020B
+  --driver D          auto (default) | canon | open     (open: LBP2900/LBP2900B/LBP3000 only)
+  --net IP            printer is on the network (Canon driver only); default is USB
+  --name QUEUE        CUPS queue name (default: model name)
+  --driver-file F     use this Canon driver archive instead of looking in the tool's folder
+  --driver-dir D      look for the archive / cndrvcups-*.deb files here instead of the tool's folder
+
+The Canon driver is never downloaded: put its archive (.tar.gz/.zip) in the same folder as this tool.
+  --no-wait           do not wait for the printer to be switched on / connected
+  --wait SECONDS      with -y: how long to wait for the printer (default 60)
+  -y, --yes           do not ask questions
+  --dry-run           print what would be done, change nothing
+  --force             continue on an unsupported OS
+  -h, --help
+USAGE
+}
+
+NO_WAIT=0 WAIT_TIMEOUT=60
+CMD=install MODEL= DRIVER=auto NET_IP= QUEUE= DRIVER_FILE= DRIVER_DIR= FORCE=0
+while [ $# -gt 0 ]; do
+    case $1 in
+        install|detect|list|doctor|fix|uninstall) CMD=$1 ;;
+        --model) MODEL=${2:?}; shift ;;
+        --driver) DRIVER=${2:?}; shift ;;
+        --net) NET_IP=${2:?}; shift ;;
+        --no-wait) NO_WAIT=1 ;;
+        --wait) WAIT_TIMEOUT=${2:?}; shift ;;
+        --name) QUEUE=${2:?}; shift ;;
+        --driver-file) DRIVER_FILE=${2:?}; shift ;;
+        --driver-dir) DRIVER_DIR=${2:?}; shift ;;
+        -y|--yes) ASSUME_YES=1 ;;
+        --dry-run) DRY_RUN=1 ;;
+        --force) FORCE=1 ;;
+        -h|--help) usage; exit 0 ;;
+        *) usage >&2; die "unknown argument: $1" ;;
+    esac
+    shift
+done
+
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/lbp-setup.XXXXXX"); chmod 755 "$WORK"; trap 'rm -rf "$WORK"' EXIT
+
+# ---- choose model / device -------------------------------------------------------------
+DEV_NODE= DEV_SERIAL= PRINTER_LINES=
+
+find_printers() {   # fills PRINTER_LINES (node<TAB>model<TAB>serial<TAB>id)
+    PRINTER_LINES=$(detect_usb_printers)
+    if [ -z "$PRINTER_LINES" ]; then
+        local cl; cl=$(detect_cups_printers)
+        [ -n "$cl" ] && PRINTER_LINES=$(awk -F'\t' '{print "\t" $2 "\t\t" $1}' <<<"$cl")
+    fi
+    [ -n "$PRINTER_LINES" ]
+}
+
+# Ask the user to power on / connect the printer, then poll until it is detected.
+# Returns 0 = printer found, 1 = user chose to skip detection. Exits on 'q'.
+wait_for_printer() {
+    find_printers && return 0                 # already connected: no need to nag
+    [ "$NO_WAIT" = 1 ] && return 1
+    local key waited=0 interactive=0 skipword="choose the model manually"
+    [ -t 0 ] && [ "$ASSUME_YES" != 1 ] && interactive=1
+    [ -n "$MODEL" ] && skipword="continue without detection"
+    echo
+    echo "  1. Switch the printer ON."
+    echo "  2. Connect its USB cable to this computer."
+    if [ "$interactive" = 1 ]; then
+        read -r -p "Press Enter when the printer is on and connected ( s = $skipword, q = quit ): " key
+        case ${key,,} in s) return 1 ;; q) exit 1 ;; esac
+    else
+        info "non-interactive: waiting up to ${WAIT_TIMEOUT}s for the printer"
+    fi
+    while true; do
+        load_usblp
+        find_printers && { printf '\r\033[K'; return 0; }
+        if [ "$interactive" = 1 ]; then
+            printf '\r\033[KWaiting for the printer ... (Enter = check now, s = %s, q = quit) ' "$skipword"
+            key=; read -r -s -t 3 -n1 key || true
+            case ${key,,} in s) echo; return 1 ;; q) echo; exit 1 ;; esac
+        else
+            sleep 3; waited=$((waited+3))
+            [ "$waited" -ge "$WAIT_TIMEOUT" ] && { warn "printer not detected after ${WAIT_TIMEOUT}s"; return 1; }
+        fi
+    done
+}
+
+select_target() {
+    local n pick=1 l
+    if [ -n "$NET_IP" ]; then            # network printer: nothing to detect on USB
+        [ -n "$MODEL" ] || MODEL=$(pick_model_menu) || die "no model selected"
+        MODEL=$(resolve_model "$MODEL") || die "unknown model"
+        return 0
+    fi
+    if wait_for_printer; then
+        n=$(printf '%s\n' "$PRINTER_LINES" | grep -c .)
+        info "Detected Canon printer(s):"
+        printf '%s\n' "$PRINTER_LINES" | awk -F'\t' '{printf "   %s  model=%s  serial=%s  (id: %s)\n",$1,$2,$3,$4}'
+        if [ "$n" -gt 1 ] && [ "$ASSUME_YES" != 1 ] && [ -t 0 ]; then
+            read -r -p "Which one? [1-$n] " pick; pick=${pick:-1}
+        fi
+        l=$(printf '%s\n' "$PRINTER_LINES" | sed -n "${pick}p")
+        DEV_NODE=$(cut -f1 <<<"$l"); DEV_SERIAL=$(cut -f3 <<<"$l")
+        local det; det=$(cut -f2 <<<"$l")
+        if [ -n "$MODEL" ]; then
+            local m; m=$(resolve_model "$MODEL") || die "unknown model '$MODEL' (see: $0 list)"
+            [ "$det" != '?' ] && [ "$det" != "$m" ] && warn "you asked for $m but the connected printer reports $det"
+            MODEL=$m
+        elif [ "$det" = '?' ]; then
+            warn "printer found but its model is not in the table; please choose it"
+        elif ask_yes_no "Install the driver for $det?" y; then
+            MODEL=$det
+        fi
+    elif canon_usb_present; then
+        warn "A Canon USB device is present but no /dev/usb/lp* node appeared (power-cycle the printer?)."
+    fi
+    if [ -n "$MODEL" ]; then MODEL=$(resolve_model "$MODEL") || die "unknown model"; return 0; fi
+    [ "$CMD" = detect ] && return 0
+    MODEL=$(pick_model_menu) || die "no model selected"
+}
+
+choose_driver() {  # sets DRIVER to canon|open
+    local open; open=$(model_field "$MODEL" 4)
+    case $DRIVER in
+        canon) ;;
+        open)  [ "$open" != "-" ] || die "the open-source driver does not support $MODEL (only LBP2900/LBP2900B/LBP3000)" ;;
+        auto)
+            if [ "$open" = works ] || { [ "$open" != "-" ] && [ "$ARCH" != amd64 ] && [ "$ARCH" != i386 ]; }; then
+                DRIVER=open
+            else
+                DRIVER=canon
+            fi ;;
+        *) die "--driver must be auto, canon or open" ;;
+    esac
+}
+
+cmd_install() {
+    require_root install
+    check_os_supported
+    install_base_deps            # prerequisites first, before anything else
+    load_usblp
+    select_target
+    [ -n "$MODEL" ] || die "no printer selected"
+    choose_driver
+    local name=${QUEUE:-$(norm "$MODEL")}
+    local conn=usb; [ -n "$NET_IP" ] && conn=net:$NET_IP
+    info "Model: $MODEL   driver: $DRIVER   queue: $name   connection: $conn"
+    [ "$conn" != usb ] && [ "$DRIVER" = open ] && die "the open-source driver supports USB only"
+    [ "$conn" = usb ] && [ -z "$DEV_NODE" ] && [ "$DRIVER" = canon ] && {
+        warn "no USB device node found yet; assuming /dev/usb/lp0 (power on the printer, then re-run '$0 doctor')"
+        DEV_NODE=/dev/usb/lp0; }
+
+    if [ "$DRIVER" = canon ]; then
+        if ! install_canon_deps; then
+            local open; open=$(model_field "$MODEL" 4)
+            if [ "$open" != "-" ] && [ "$conn" = usb ]; then
+                warn "falling back to the open-source driver for $MODEL ($open)"
+                DRIVER=open
+            else
+                die "Canon's driver cannot run on this system (32-bit libraries unavailable) and no open-source driver exists for $MODEL"
+            fi
+        fi
+    fi
+    if [ "$DRIVER" = canon ]; then
+        canon_locate_driver || exit 1
+        canon_install_packages
+        canon_fix_captmon || warn "monitor library problem - see message above"
+        canon_configure "$MODEL" "$name" "$conn" "$DEV_NODE" "$DEV_SERIAL"
+        [ "$DRY_RUN" = 1 ] || canon_doctor || warn "doctor found problems (see above)"
+    else
+        open_build_install
+        open_configure "$MODEL" "$name" "$DEV_SERIAL"
+    fi
+    ok "Done."
+}
+
+cmd_detect() {
+    detect_os; load_usblp
+    select_target
+    if [ -n "$MODEL" ]; then
+        choose_driver
+        echo "model=$MODEL ppd_id=$(model_field "$MODEL" 2) open_driver=$(model_field "$MODEL" 4) would_use=$DRIVER node=${DEV_NODE:-?} serial=${DEV_SERIAL:-?}"
+    else
+        echo "no printer identified"
+    fi
+}
+
+case $CMD in
+    install)   cmd_install ;;
+    detect)    cmd_detect ;;
+    list)      printf '%-10s %-8s %-7s %s\n' MODEL PPD COLOUR OPEN-DRIVER
+               grep -v '^#' "$MODELS_FILE" | awk -F'\t' '{printf "%-10s %-8s %-7s %s\n",$1,$2,$3,$4}' ;;
+    doctor)    require_root doctor; canon_doctor ;;
+    fix)       require_root fix; check_os_supported; canon_fix_captmon; canon_restart_ccpd; canon_doctor ;;
+    uninstall) require_root uninstall; canon_uninstall; open_uninstall
+               [ -n "$QUEUE" ] && { run ccpdadmin -x "$QUEUE" 2>/dev/null; run lpadmin -x "$QUEUE" 2>/dev/null; }
+               ok "removed" ;;
+esac

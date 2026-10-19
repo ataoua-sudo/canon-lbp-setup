@@ -1,0 +1,38 @@
+# model	ppd_id	colour	open_driver	note
+# ppd_id -> /usr/share/cups/model/CNCUPSLBP<ppd_id>CAPTK.ppd (Canon CAPT driver v2.71)
+# open_driver: works | experimental | -   (bundled open-source filter, see open-driver/)
+LBP-810	1120	mono	-	not officially supported by Canon; uses the LBP1120 PPD
+LBP1120	1120	mono	-	
+LBP1210	1210	mono	-	
+LBP2900	2900	mono	works	also LBP2900B
+LBP3000	3000	mono	experimental	
+LBP3010	3050	mono	-	shares LBP3050 PPD
+LBP3018	3050	mono	-	shares LBP3050 PPD
+LBP3050	3050	mono	-	
+LBP3100	3150	mono	-	shares LBP3150 PPD
+LBP3108	3150	mono	-	shares LBP3150 PPD
+LBP3150	3150	mono	-	
+LBP3200	3200	mono	-	
+LBP3210	3210	mono	-	
+LBP3250	3250	mono	-	
+LBP3300	3300	mono	-	
+LBP3310	3310	mono	-	
+LBP3500	3500	mono	-	
+LBP5000	5000	colour	-	
+LBP5050	5050	colour	-	
+LBP5100	5100	colour	-	
+LBP5300	5300	colour	-	
+LBP6000	6018	mono	-	shares LBP6018 PPD
+LBP6018	6018	mono	-	
+LBP6020	6020	mono	-	
+LBP6020B	6020	mono	-	shares LBP6020 PPD
+LBP6200	6200	mono	-	
+LBP6300	6300	mono	-	also LBP6300dn
+LBP6300n	6300n	mono	-	network model
+LBP6310	6310	mono	-	
+LBP7010C	7018C	colour	-	shares LBP7018C PPD
+LBP7018C	7018C	colour	-	
+LBP7200C	7200C	colour	-	
+LBP7210C	7210C	colour	-	
+LBP9100C	9100C	colour	-	
+LBP9200C	9200C	colour	-	

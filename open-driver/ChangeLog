@@ -1,0 +1,2 @@
+0.1.0: Ubuntu 26.04 packaging for LBP2900 and LBP3000; LBP3000 job prologue rewritten
+(reads job id, supports retry); PPDs with IEEE-1284 device IDs; install/uninstall scripts; udev rule; CI.
